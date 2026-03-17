@@ -1,6 +1,7 @@
 var express = require('express');
 var router = express.Router();
 let productModel = require('../schemas/products');//dbContext
+let inventoryModel = require('../schemas/inventories');
 const { default: slugify } = require('slugify');
 
 /* GET users listing. */
@@ -11,14 +12,14 @@ router.get('/', async function (req, res, next) {
   let titleQ = queries.title ? queries.title : '';
   let result = await productModel.find({
     isDeleted: false,
-    title: new RegExp(titleQ,'i'),
-    price:{
-      $gte:minPrice,
-      $lte:maxPrice
+    title: new RegExp(titleQ, 'i'),
+    price: {
+      $gte: minPrice,
+      $lte: maxPrice
     }
   }).populate({
-    path:'category',
-    select:'name'
+    path: 'category',
+    select: 'name'
   })
   // result = result.filter(
   //   function (e) {
@@ -61,6 +62,13 @@ router.post('/', async function (req, res, next) {
     images: req.body.images
   });
   await newProduct.save();
+  let newInventory = new inventoryModel({
+    product: newProduct._id,
+    stock: 0,
+    reserved: 0,
+    soldCount: 0
+  });
+  await newInventory.save();
   res.send(newProduct)
 })
 router.put('/:id', async function (req, res, next) {
