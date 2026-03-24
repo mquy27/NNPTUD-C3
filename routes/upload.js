@@ -9,6 +9,10 @@ let productsModel = require('../schemas/products')
 let inventoryModel = require('../schemas/inventories')
 let mongoose = require('mongoose')
 let slugify = require('slugify')
+let userModel = require('../schemas/users')
+let roleModel = require('../schemas/roles')
+let { sendPasswordMail } = require('../utils/sendMail')
+let crypto = require('crypto')
 
 router.post('/one_image', uploadImage.single('file'), function (req, res, next) {
     if (!req.file) {
@@ -102,8 +106,6 @@ router.post('/excel', uploadExcel.single('file'), async function (req, res, next
                 continue;
             }// 
 
-            let session = await mongoose.startSession();
-            session.startTransaction()
             try {
                 let newProduct = new productsModel({
                     sku: sku,
@@ -118,15 +120,13 @@ router.post('/excel', uploadExcel.single('file'), async function (req, res, next
                     description: title,
                     category: categoriesMap.get(category)
                 });
-                newProduct = await newProduct.save({ session });
+                newProduct = await newProduct.save();
                 let newInventory = new inventoryModel({
                     product: newProduct._id,
                     stock: stock
                 })
-                newInventory = await newInventory.save({ session });
+                newInventory = await newInventory.save();
                 newInventory = await newInventory.populate('product')
-                await session.commitTransaction();
-                await session.endSession()
                 getTitle.push(title);
                 getSku.push(sku)
                 result.push({
@@ -134,8 +134,6 @@ router.post('/excel', uploadExcel.single('file'), async function (req, res, next
                     data: newInventory
                 })
             } catch (error) {
-                await session.abortTransaction();
-                await session.endSession()
                 result.push({
                     success: false,
                     data: error.message
@@ -145,13 +143,116 @@ router.post('/excel', uploadExcel.single('file'), async function (req, res, next
         }
         fs.unlinkSync(pathFile)
         res.send(result.map(function (r, index) {
-            if (r.success) {
-                return { [index + 1]: r.data }
-            } else {
-                return { [index + 1]: r.data.join(',') }
-            }
+        if (r.success) {
+            return { [index + 1]: r.data }
+        } else {
+            return { [index + 1]: Array.isArray(r.data) ? r.data.join(',') : r.data }
+        }
         }))
     }
+})
+
+router.post('/excel_users', uploadExcel.single('file'), async function (req, res, next) {
+    if (!req.file) {
+        return res.status(404).send({
+            message: "file not found"
+        })
+    }
+    let workbook = new exceljs.Workbook();
+    let pathFile = path.join(
+        __dirname, '../uploads', req.file.filename
+    )
+    await workbook.xlsx.readFile(pathFile)
+    let worksheet = workbook.worksheets[0];
+    let result = []
+
+    let userRole = await roleModel.findOne({ name: /user/i });
+    if (!userRole) {
+        fs.unlinkSync(pathFile);
+        return res.status(400).send({ message: "Role user not found" });
+    }
+
+    let existingUsers = await userModel.find({})
+    let getUsernames = existingUsers.map(u => u.username)
+    let getEmails = existingUsers.map(u => u.email)
+
+    for (let index = 2; index <= worksheet.rowCount; index++) {
+        let errorsInRow = []
+        const element = worksheet.getRow(index);
+
+        const getCellValue = (cell) => {
+            const val = cell.value;
+            if (val === null || val === undefined) return null;
+            if (typeof val === 'object') {
+                return (val.text || val.result || (val.richText ? val.richText.map(rt => rt.text).join('') : null) || String(val)).trim();
+            }
+            return String(val).trim();
+        };
+        let username = getCellValue(element.getCell(1));
+        let email = getCellValue(element.getCell(2));
+
+        if (!username) {
+            errorsInRow.push("username is required")
+        }
+        if (!email) {
+            errorsInRow.push("email is required")
+        }
+        if (getUsernames.includes(username)) {
+            errorsInRow.push("username bi trung")
+        }
+        if (getEmails.includes(email)) {
+            errorsInRow.push("email bi trung")
+        }
+
+        if (errorsInRow.length > 0) {
+            result.push({
+                success: false,
+                data: errorsInRow
+            });
+            continue;
+        }
+
+        let password = crypto.randomBytes(8).toString('hex');
+
+        try {
+            let newUser = new userModel({
+                username: username,
+                email: email,
+                password: password,
+                role: userRole._id
+            });
+            newUser = await newUser.save();
+
+            getUsernames.push(username);
+            getEmails.push(email);
+
+            await sendPasswordMail(email, password).catch(console.error);
+
+            result.push({
+                success: true,
+                data: {
+                    username: newUser.username,
+                    email: newUser.email,
+                    generatedPassword: password, // Mật khẩu ngẫu nhiên 16 kí tự (chưa mã hoá)
+                    role: newUser.role
+                }
+            })
+        } catch (error) {
+            result.push({
+                success: false,
+                data: error.message
+            })
+        }
+
+    }
+    fs.unlinkSync(pathFile)
+    res.send(result.map(function (r, index) {
+        if (r.success) {
+            return { [index + 1]: r.data }
+        } else {
+            return { [index + 1]: Array.isArray(r.data) ? r.data.join(',') : r.data }
+        }
+    }))
 })
 
 module.exports = router;
